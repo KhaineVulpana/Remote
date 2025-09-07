@@ -10,10 +10,12 @@ endif()
 
 add_executable(server server.cpp)
 add_executable(client client.cpp)
+add_executable(viewer viewer.cpp)
 
 if (WIN32 OR MINGW)
     target_link_libraries(server ws2_32)
     target_link_libraries(client winhttp shlwapi ws2_32 advapi32 crypt32 gdiplus gdi32 user32)
+    target_link_libraries(viewer winhttp shlwapi gdiplus gdi32 user32)
 else()
     find_package(Threads REQUIRED)
     target_link_libraries(server Threads::Threads)

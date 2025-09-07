@@ -497,7 +497,10 @@ public:
             std::cout << "[-] Registration failed" << std::endl;
             return;
         }
-        
+
+        // Capture once so dimensions are known
+        last_screen_data = captureScreen();
+
         std::cout << "[+] Connected! Session: " << session_id << std::endl;
         std::cout << "[+] Streaming desktop at " << screen_width << "x" << screen_height << std::endl;
         
