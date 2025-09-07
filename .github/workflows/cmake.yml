@@ -1,0 +1,22 @@
+name: CMake
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure CMake
+        run: cmake -S . -B build -A x64
+      - name: Build
+        run: cmake --build build --config Release
+      - name: Upload executables
+        uses: actions/upload-artifact@v3
+        with:
+          name: windows-build
+          path: |
+            build/Release/server.exe
+            build/Release/client.exe
