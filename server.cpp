@@ -1,3 +1,4 @@
+#ifdef _WIN32
 #include <iostream>
 #include <string>
 #include <map>
@@ -601,3 +602,10 @@ int main(int argc, char* argv[]) {
     GdiplusShutdown(gdiplusToken);
     return 0;
 }
+#else
+#include <iostream>
+int main() {
+    std::cerr << "Remote desktop server is only supported on Windows." << std::endl;
+    return 0;
+}
+#endif // _WIN32
