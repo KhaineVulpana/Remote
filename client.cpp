@@ -1,3 +1,4 @@
+#ifdef _WIN32
 #include <iostream>
 #include <string>
 #include <thread>
@@ -534,6 +535,13 @@ int main(int argc, char* argv[]) {
     client.run();
     
     GdiplusShutdown(gdiplusToken);
-    
+
     return 0;
 }
+#else
+#include <iostream>
+int main() {
+    std::cerr << "Remote desktop client is only supported on Windows." << std::endl;
+    return 0;
+}
+#endif // _WIN32
