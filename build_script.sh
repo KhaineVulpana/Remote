@@ -21,20 +21,25 @@ echo "🔍 Detected OS: $OS"
 CPP_FLAGS="-std=c++17 -O2 -Wall"
 CLIENT_LIBS=""
 SERVER_LIBS=""
+VIEWER_LIBS=""
 
 if [[ "$OS" == "Windows" ]]; then
     # Windows-specific libraries for GUI remote desktop
     CLIENT_LIBS="-lwinhttp -lshlwapi -lws2_32 -ladvapi32 -lcrypt32 -lgdiplus -lgdi32 -luser32 -static"
     SERVER_LIBS="-lws2_32 -static"
+    VIEWER_LIBS="-lwinhttp -lshlwapi -lgdiplus -lgdi32 -luser32 -static"
     CLIENT_EXE="rdp_client.exe"
     SERVER_EXE="rdp_server.exe"
+    VIEWER_EXE="rdp_viewer.exe"
     echo "🎯 Target: Windows Remote Desktop"
 elif [[ "$OS" == "Linux" ]]; then
     # Linux would need X11 libraries for screen capture
     CLIENT_LIBS="-pthread -lX11 -lXext"
     SERVER_LIBS="-pthread"
+    VIEWER_LIBS="-pthread -lX11 -lXext"
     CLIENT_EXE="rdp_client"
     SERVER_EXE="rdp_server"
+    VIEWER_EXE="rdp_viewer"
     echo "🎯 Target: Linux Remote Desktop"
     echo "⚠️  Note: Linux client requires X11 development libraries"
     echo "   Install with: sudo apt-get install libx11-dev libxext-dev"
@@ -73,6 +78,14 @@ else
     exit 1
 fi
 
+echo "👀  Compiling viewer..."
+if g++ $CPP_FLAGS viewer.cpp -o ${VIEWER_EXE} ${VIEWER_LIBS}; then
+    echo "✅ Viewer compiled successfully: ${VIEWER_EXE}"
+else
+    echo "❌ Viewer compilation failed"
+    exit 1
+fi
+
 echo
 echo "========================================================="
 echo "🎉 BUILD COMPLETE!"
@@ -80,6 +93,7 @@ echo "========================================================="
 echo "📁 Files created:"
 echo "   Server: $SERVER_EXE"
 echo "   Client: $CLIENT_EXE"
+echo "   Viewer: $VIEWER_EXE"
 echo
 echo "🚀 Quick Start:"
 echo "   1. Start server: ./$SERVER_EXE [port]"
